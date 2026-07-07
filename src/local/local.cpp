@@ -12,6 +12,7 @@
 using std::string;
 using std::vector;
 
+#ifdef _WIN32
 static string sockaddr_to_str(SOCKADDR* sa) {
     char buf[INET6_ADDRSTRLEN] = {0};
     if (sa->sa_family == AF_INET) {
@@ -23,6 +24,7 @@ static string sockaddr_to_str(SOCKADDR* sa) {
     }
     return buf;
 }
+#endif
 
 // keywords that identify VPN-like adapters by description / friendly name.
 static bool adapter_is_vpn(const string& desc, const string& name) {
@@ -36,6 +38,8 @@ static bool adapter_is_vpn(const string& desc, const string& name) {
     for (auto k: kw) if (icontains(desc, k) || icontains(name, k)) return true;
     return false;
 }
+
+#ifdef _WIN32
 
 vector<LocalAdapter> list_local_adapters() {
     vector<LocalAdapter> out;
@@ -216,6 +220,242 @@ vector<ConfigHit> find_known_configs() {
     }
     return out;
 }
+
+#else // ---- POSIX: getifaddrs + /proc based local analysis -----------------
+
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netpacket/packet.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+
+namespace {
+
+string addr_to_str(const sockaddr* sa) {
+    if (!sa) return {};
+    char buf[INET6_ADDRSTRLEN] = {0};
+    if (sa->sa_family == AF_INET)
+        inet_ntop(AF_INET, &((const sockaddr_in*)sa)->sin_addr, buf, sizeof(buf));
+    else if (sa->sa_family == AF_INET6)
+        inet_ntop(AF_INET6, &((const sockaddr_in6*)sa)->sin6_addr, buf, sizeof(buf));
+    return buf;
+}
+
+// Linux tunnel interfaces rarely carry a descriptive name, so match on the
+// conventional device-name prefixes in addition to the shared keyword list.
+bool iface_is_tunnel(const string& name) {
+    static const char* pfx[] = { "tun", "tap", "wg", "utun", "nordlynx",
+                                 "proton", "mullvad", "amnezia", "warp", "gpd" };
+    for (auto p : pfx) if (starts_with(name, p)) return true;
+    return false;
+}
+
+struct KnownProcL { const char* name; const char* category; };
+const KnownProcL VPN_PROCESSES[] = {
+    {"xray",            "Xray-core"},
+    {"v2ray",           "V2Ray"},
+    {"sing-box",        "sing-box"},
+    {"nekoray",         "NekoRay (GUI -> sing-box/Xray)"},
+    {"nekobox_core",    "NekoBox"},
+    {"hiddify",         "Hiddify"},
+    {"HiddifyCli",      "Hiddify CLI"},
+    {"wg",              "WireGuard CLI"},
+    {"wireguard-go",    "WireGuard (userspace)"},
+    {"openvpn",         "OpenVPN"},
+    {"openvpn3",        "OpenVPN 3"},
+    {"openconnect",     "OpenConnect (Cisco/AnyConnect-compatible)"},
+    {"vpnc",            "vpnc"},
+    {"warp-svc",        "Cloudflare WARP service"},
+    {"protonvpn",       "ProtonVPN"},
+    {"nordvpnd",        "NordVPN daemon"},
+    {"nordvpn",         "NordVPN"},
+    {"expressvpnd",     "ExpressVPN"},
+    {"mullvad-daemon",  "Mullvad daemon"},
+    {"mullvad",         "Mullvad"},
+    {"shadowsocks",     "Shadowsocks"},
+    {"sslocal",         "shadowsocks-rust (sslocal)"},
+    {"ss-local",        "shadowsocks-libev"},
+    {"clash",           "Clash"},
+    {"clash-verge",     "Clash Verge"},
+    {"mihomo",          "mihomo (Clash.Meta)"},
+    {"tun2socks",       "tun2socks"},
+    {"hysteria",        "Hysteria"},
+    {"tuic-client",     "TUIC"},
+    {"amneziawg-go",    "AmneziaWG"},
+    {"AmneziaVPN",      "AmneziaVPN"},
+};
+
+const char* match_vpn_proc(const string& comm) {
+    for (auto& e : VPN_PROCESSES)
+        if (strcasecmp(comm.c_str(), e.name) == 0) return e.category;
+    return nullptr;
+}
+
+// config locations. an entry is either absolute (home=false) or relative to
+// $HOME (home=true).
+struct KnownConfigL { bool home; const char* sub; const char* tool; };
+const KnownConfigL KNOWN_CONFIGS[] = {
+    {true,  ".config/xray",        "Xray-core configs"},
+    {true,  ".config/v2ray",       "V2Ray configs"},
+    {true,  ".config/sing-box",    "sing-box configs"},
+    {true,  ".config/nekoray",     "NekoRay configs"},
+    {true,  ".config/hiddify",     "Hiddify configs"},
+    {true,  ".config/clash",       "Clash configs"},
+    {true,  ".config/clash-verge", "Clash Verge configs"},
+    {true,  ".config/mihomo",      "mihomo configs"},
+    {true,  ".config/wireguard",   "WireGuard (user) configs"},
+    {true,  ".config/protonvpn",   "ProtonVPN configs"},
+    {false, "/etc/wireguard",      "WireGuard (system) configs"},
+    {false, "/etc/openvpn",        "OpenVPN configs"},
+    {false, "/etc/amnezia",        "AmneziaVPN"},
+    {false, "/etc/nordvpn",        "NordVPN"},
+};
+
+} // namespace
+
+vector<LocalAdapter> list_local_adapters() {
+    vector<LocalAdapter> out;
+    ifaddrs* ifa = nullptr;
+    if (getifaddrs(&ifa) != 0 || !ifa) return out;
+
+    std::map<string, size_t> idx;   // interface name -> out index (dedup by name)
+    for (auto* p = ifa; p; p = p->ifa_next) {
+        if (!p->ifa_name) continue;
+        string name = p->ifa_name;
+        auto it = idx.find(name);
+        if (it == idx.end()) {
+            idx[name] = out.size();
+            LocalAdapter A;
+            A.friendly    = name;
+            A.description = name;
+            A.if_index    = if_nametoindex(name.c_str());
+            A.is_up       = (p->ifa_flags & IFF_UP) && (p->ifa_flags & IFF_RUNNING);
+            A.is_vpn      = adapter_is_vpn(name, name) || iface_is_tunnel(name);
+            out.push_back(std::move(A));
+        }
+        LocalAdapter& A = out[idx[name]];
+        if (!p->ifa_addr) continue;
+        int fam = p->ifa_addr->sa_family;
+        if (fam == AF_INET) {
+            string s = addr_to_str(p->ifa_addr);
+            if (!s.empty()) A.ipv4.push_back(s);
+        } else if (fam == AF_INET6) {
+            string s = addr_to_str(p->ifa_addr);
+            if (!s.empty()) A.ipv6.push_back(s);
+        } else if (fam == AF_PACKET) {
+            auto* ll = (sockaddr_ll*)p->ifa_addr;
+            if (ll->sll_halen == 6) A.mac = mac_to_str(ll->sll_addr, ll->sll_halen);
+        }
+    }
+    freeifaddrs(ifa);
+
+    // MTU is not exposed via getifaddrs — pull it per-interface with an ioctl.
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+        for (auto& A : out) {
+            ifreq ifr{};
+            std::strncpy(ifr.ifr_name, A.friendly.c_str(), IFNAMSIZ - 1);
+            if (ioctl(fd, SIOCGIFMTU, &ifr) == 0) A.mtu = (unsigned long)ifr.ifr_mtu;
+        }
+        close(fd);
+    }
+    return out;
+}
+
+vector<LocalRoute> list_local_routes() {
+    // IPv4 routes from /proc/net/route. addresses are printed as the hex of the
+    // __be32 in host order, so assigning straight into in_addr.s_addr yields the
+    // correct dotted-quad on little-endian. (IPv6 routes are not parsed — the
+    // tunnel-mode analysis keys off the IPv4 default route.)
+    vector<LocalRoute> out;
+    FILE* f = fopen("/proc/net/route", "r");
+    if (!f) return out;
+    char line[512];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return out; }   // header
+    while (fgets(line, sizeof(line), f)) {
+        char iface[64];
+        unsigned long dest = 0, gw = 0, mask = 0, metric = 0;
+        unsigned flags = 0; int refcnt = 0, use = 0;
+        int m = sscanf(line, "%63s %lx %lx %x %d %d %lu %lx",
+                       iface, &dest, &gw, &flags, &refcnt, &use, &metric, &mask);
+        if (m < 8) continue;
+        LocalRoute R;
+        in_addr da{}; da.s_addr = (uint32_t)dest;
+        in_addr ga{}; ga.s_addr = (uint32_t)gw;
+        char db[INET_ADDRSTRLEN] = {0}, gb[INET_ADDRSTRLEN] = {0};
+        inet_ntop(AF_INET, &da, db, sizeof(db));
+        inet_ntop(AF_INET, &ga, gb, sizeof(gb));
+        R.prefix   = string(db) + "/" + std::to_string(__builtin_popcount((uint32_t)mask));
+        R.nexthop  = gb;
+        R.if_index = if_nametoindex(iface);
+        R.metric   = metric;
+        out.push_back(std::move(R));
+    }
+    fclose(f);
+    return out;
+}
+
+vector<LocalProcess> list_vpn_processes() {
+    vector<LocalProcess> out;
+    DIR* d = opendir("/proc");
+    if (!d) return out;
+    for (dirent* e; (e = readdir(d)) != nullptr; ) {
+        if (!std::isdigit((unsigned char)e->d_name[0])) continue;
+        bool digits = true;
+        for (const char* c = e->d_name; *c; ++c)
+            if (!std::isdigit((unsigned char)*c)) { digits = false; break; }
+        if (!digits) continue;
+
+        string comm;
+        {
+            string path = string("/proc/") + e->d_name + "/comm";
+            FILE* f = fopen(path.c_str(), "r");
+            if (!f) continue;
+            char c[256] = {0};
+            if (fgets(c, sizeof(c), f)) comm = c;
+            fclose(f);
+            while (!comm.empty() && (comm.back() == '\n' || comm.back() == '\r'))
+                comm.pop_back();
+        }
+        if (comm.empty()) continue;
+        const char* cat = match_vpn_proc(comm);
+        if (!cat) continue;
+
+        LocalProcess LP;
+        LP.pid      = strtoul(e->d_name, nullptr, 10);
+        LP.name     = comm;
+        LP.category = cat;
+        string exe = string("/proc/") + e->d_name + "/exe";
+        char buf[4096];
+        ssize_t n = readlink(exe.c_str(), buf, sizeof(buf) - 1);
+        if (n > 0) { buf[n] = 0; LP.exe_path = buf; }
+        out.push_back(std::move(LP));
+    }
+    closedir(d);
+    return out;
+}
+
+vector<ConfigHit> find_known_configs() {
+    vector<ConfigHit> out;
+    const char* home = getenv("HOME");
+    for (auto& k : KNOWN_CONFIGS) {
+        string full;
+        if (k.home) {
+            if (!home || !*home) continue;
+            full = string(home) + "/" + k.sub;
+        } else {
+            full = k.sub;
+        }
+        if (access(full.c_str(), F_OK) == 0)
+            out.push_back({k.tool, full});
+    }
+    return out;
+}
+
+#endif // _WIN32
 
 void run_local_analysis() {
     printf("\n%s[LOCAL ANALYSIS] This machine — adapters, routes, VPN software%s\n\n",

@@ -26,10 +26,14 @@ namespace {
 // SndWnd is the peer's advertised receive window (what we can send).
 // RcvWnd is what we advertise (our local). we want SndWnd as the peer signal.
 // the constant SIO_TCP_INFO is _WSAIORW(IOC_VENDOR, 39) = 0xD8000027.
+#ifdef _WIN32
 #ifndef SIO_TCP_INFO
 #define SIO_TCP_INFO  _WSAIORW(IOC_VENDOR, 39)
 #endif
+#endif
 
+// on Windows this mirrors the OS TCP_INFO_v0 layout that WSAIoctl fills; on
+// POSIX it is just a neutral container we populate from struct tcp_info.
 struct TCP_INFO_v0_local {
     unsigned int State;
     unsigned int Mss;
@@ -109,7 +113,8 @@ double timed_connect(const string& host, int port, int to_ms) {
     return std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
 }
 
-// connect, immediately probe SIO_TCP_INFO, return the snapshot.
+// connect, immediately probe the kernel's per-connection TCP snapshot.
+#ifdef _WIN32
 bool snapshot_tcp_info(const string& host, int port, int to_ms, TCP_INFO_v0_local& out) {
     string err;
     SOCKET s = tcp_connect(host, port, to_ms, err);
@@ -120,6 +125,24 @@ bool snapshot_tcp_info(const string& host, int port, int to_ms, TCP_INFO_v0_loca
     closesocket(s);
     return rc == 0 && bytesRet >= sizeof(unsigned int) * 4;
 }
+#else
+// Linux equivalent: getsockopt(TCP_INFO) after the handshake. we only surface
+// the two fields the fingerprint consumes — negotiated MSS and the peer's
+// advertised send window (tcpi_snd_wnd, kernel 4.6+).
+bool snapshot_tcp_info(const string& host, int port, int to_ms, TCP_INFO_v0_local& out) {
+    string err;
+    SOCKET s = tcp_connect(host, port, to_ms, err);
+    if (s == INVALID_SOCKET) return false;
+    struct tcp_info ti{};
+    socklen_t len = sizeof(ti);
+    int rc = getsockopt(s, IPPROTO_TCP, TCP_INFO, &ti, &len);
+    closesocket(s);
+    if (rc != 0) return false;
+    out.Mss    = ti.tcpi_snd_mss;
+    out.SndWnd = ti.tcpi_snd_wnd;
+    return true;
+}
+#endif
 
 // closed-port behavior. returns ms-to-RST or -1 on timeout.
 int closed_port_probe(const string& host, int port, int to_ms) {

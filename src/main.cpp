@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
 #include <ctime>
 #include <future>
 #include <set>
@@ -44,7 +45,13 @@ using std::set;
 
 int main(int argc, char** argv) {
     enable_vt();
+#ifdef _WIN32
     WSADATA ws; WSAStartup(MAKEWORD(2, 2), &ws);
+#else
+    // a peer RST mid-send raises SIGPIPE on POSIX (Windows has no such signal);
+    // ignore it so a dropped probe connection can't kill the whole scan.
+    signal(SIGPIPE, SIG_IGN);
+#endif
     SSL_library_init();
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
@@ -375,6 +382,8 @@ done:
         g_save_fp = nullptr;
         std::fprintf(stderr, "saved to %s\n", g_save_path.c_str());
     }
+#ifdef _WIN32
     WSACleanup();
+#endif
     return rc;
 }

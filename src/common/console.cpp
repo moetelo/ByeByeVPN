@@ -23,11 +23,14 @@ namespace C {
 const char* col(const char* c) { return g_no_color ? "" : c; }
 
 void enable_vt() {
+#ifdef _WIN32
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     DWORD mode = 0;
     if (GetConsoleMode(h, &mode))
         SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     SetConsoleOutputCP(CP_UTF8);
+#endif
+    // POSIX terminals interpret ANSI SGR + UTF-8 natively — nothing to enable.
 }
 
 // strip ANSI CSI / SGR sequences (ESC '[' ... letter) when teeing to file.

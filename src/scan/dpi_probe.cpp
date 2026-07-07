@@ -56,8 +56,7 @@ ChResult send_ch(const string& ip, int port, const string& sni, bool fragment, i
         send(s, (const char*)rec.data(), (int)rec.size(), 0);
     }
 
-    DWORD tv = (DWORD)to_ms;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(tv));
+    sock_set_recv_timeout(s, to_ms);
     char buf[512];
     int n = recv(s, buf, sizeof(buf), 0);
     int dt = (int)std::chrono::duration_cast<std::chrono::milliseconds>(

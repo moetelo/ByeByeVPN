@@ -27,12 +27,16 @@ SOCKET tcp_connect(const string& host, int port, int timeout_ms, string& err) {
         u_long nb = 1; ioctlsocket(s, FIONBIO, &nb);
         int rc = connect(s, p->ai_addr, (int)p->ai_addrlen);
         if (rc == 0) { u_long bl = 0; ioctlsocket(s, FIONBIO, &bl); break; }
-        if (WSAGetLastError() == WSAEWOULDBLOCK) {
+        // an async connect is signalled as WSAEWOULDBLOCK on Windows but as
+        // EINPROGRESS (WSAEINPROGRESS shim) on POSIX — accept either.
+        int cerr = WSAGetLastError();
+        if (cerr == WSAEWOULDBLOCK || cerr == WSAEINPROGRESS) {
             fd_set wr, ex; FD_ZERO(&wr); FD_SET(s, &wr); FD_ZERO(&ex); FD_SET(s, &ex);
             timeval tv{}; tv.tv_sec = timeout_ms / 1000; tv.tv_usec = (timeout_ms % 1000) * 1000;
-            int sr = select(0, nullptr, &wr, &ex, &tv);
+            // nfds is ignored on Windows but must bound the fd set on POSIX.
+            int sr = select((int)s + 1, nullptr, &wr, &ex, &tv);
             if (sr > 0 && FD_ISSET(s, &wr)) {
-                int se = 0; int sl = sizeof(se);
+                int se = 0; socklen_t sl = sizeof(se);
                 getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&se, &sl);
                 if (se == 0) { u_long bl = 0; ioctlsocket(s, FIONBIO, &bl); break; }
                 if (se == WSAECONNREFUSED) saw_refused = true;
@@ -40,7 +44,7 @@ SOCKET tcp_connect(const string& host, int port, int timeout_ms, string& err) {
                 saw_timeout = true;
             }
         } else {
-            if (WSAGetLastError() == WSAECONNREFUSED) saw_refused = true;
+            if (cerr == WSAECONNREFUSED) saw_refused = true;
         }
         closesocket(s); s = INVALID_SOCKET;
     }
@@ -54,8 +58,7 @@ SOCKET tcp_connect(const string& host, int port, int timeout_ms, string& err) {
 }
 
 int tcp_recv_to(SOCKET s, char* buf, int max, int timeout_ms) {
-    DWORD to = (DWORD)timeout_ms;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&to, sizeof(to));
+    sock_set_recv_timeout(s, timeout_ms);
     return recv(s, buf, max, 0);
 }
 
