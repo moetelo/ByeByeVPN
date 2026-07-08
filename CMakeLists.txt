@@ -50,6 +50,7 @@ set(BBVPN_SOURCES
     src/scan/chrome_ch.cpp
     src/scan/utls.cpp
     src/scan/tcpfp.cpp
+    src/scan/tcp_info_linux.cpp
     src/scan/ja4s_db.cpp
     src/scan/amnezia_probe.cpp
     src/scan/quic.cpp

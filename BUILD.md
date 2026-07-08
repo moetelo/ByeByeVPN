@@ -129,6 +129,37 @@ The resulting archive SHA256s won't match the msys2 values (different
 compile flags, different build date), but functional behaviour is the
 same.
 
+## Linux release build
+
+The native Linux release is a self-contained x86_64 binary: OpenSSL,
+libstdc++ and libgcc are linked statically, and only glibc stays
+dynamic (a fully-static glibc binary can't do `getaddrinfo`/NSS, which
+this tool needs).
+
+```bash
+# Debian/Ubuntu — the static OpenSSL archive ships in libssl-dev
+sudo apt install -y g++ make libssl-dev zlib1g-dev
+
+make linux-static
+ldd byebyevpn          # shows only linux-vdso, libc, ld-linux
+sha256sum byebyevpn
+```
+
+The release binary is built on **ubuntu-22.04** (glibc 2.35) so it runs
+on any mainstream distro from ~2022 on — Ubuntu 22.04+, Debian 12+,
+RHEL/Rocky 9+. The runtime glibc floor is set by the build host's
+glibc, so build on the oldest distro you want to support.
+
+Note: `src/scan/tcp_info_linux.cpp` reads `struct tcp_info` from the
+kernel's `<linux/tcp.h>` in its own translation unit. glibc's
+`<netinet/tcp.h>` ships a stale copy of that struct that omits
+`tcpi_snd_wnd` on most versions (2.35, 2.39, …), which the TCP
+fingerprint needs.
+
+The CI job (`.github/workflows/release.yml`, `linux-static`) does the
+same build, verifies nothing leaked back in as a dynamic dependency,
+emits a CycloneDX SBOM, and produces a signed `.tar.gz`.
+
 ## Release binary verification
 
 Every release tag ships SHA256 sums in the release notes. Verify:

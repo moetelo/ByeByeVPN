@@ -13,6 +13,13 @@
 using std::string;
 using std::vector;
 
+#if defined(__linux__)
+// defined in tcp_info_linux.cpp — an isolated TU that reads struct tcp_info
+// from the kernel's <linux/tcp.h> (glibc's copy is stale). external linkage,
+// so it must be declared here at global scope, not inside the namespace below.
+bool bbv_tcp_snapshot(int fd, unsigned* mss, unsigned* snd_wnd);
+#endif
+
 namespace {
 
 // SIO_TCP_INFO is exposed since Windows 10 1703. struct is TCP_INFO_v0.
@@ -125,22 +132,28 @@ bool snapshot_tcp_info(const string& host, int port, int to_ms, TCP_INFO_v0_loca
     closesocket(s);
     return rc == 0 && bytesRet >= sizeof(unsigned int) * 4;
 }
-#else
-// Linux equivalent: getsockopt(TCP_INFO) after the handshake. we only surface
-// the two fields the fingerprint consumes — negotiated MSS and the peer's
-// advertised send window (tcpi_snd_wnd, kernel 4.6+).
+#elif defined(__linux__)
+// Linux: getsockopt(TCP_INFO) after the handshake surfaces the two fields the
+// fingerprint consumes — negotiated MSS and the peer's advertised send window.
+// the actual read lives in tcp_info_linux.cpp: glibc's <netinet/tcp.h> copy of
+// struct tcp_info is stale and omits tcpi_snd_wnd on most versions (2.35, 2.39,
+// ...), so that field is read from the kernel's authoritative <linux/tcp.h> in
+// an isolated translation unit.
 bool snapshot_tcp_info(const string& host, int port, int to_ms, TCP_INFO_v0_local& out) {
     string err;
     SOCKET s = tcp_connect(host, port, to_ms, err);
     if (s == INVALID_SOCKET) return false;
-    struct tcp_info ti{};
-    socklen_t len = sizeof(ti);
-    int rc = getsockopt(s, IPPROTO_TCP, TCP_INFO, &ti, &len);
+    unsigned mss = 0, snd_wnd = 0;
+    bool ok = bbv_tcp_snapshot((int)s, &mss, &snd_wnd);
     closesocket(s);
-    if (rc != 0) return false;
-    out.Mss    = ti.tcpi_snd_mss;
-    out.SndWnd = ti.tcpi_snd_wnd;
+    if (!ok) return false;
+    out.Mss    = mss;
+    out.SndWnd = snd_wnd;
     return true;
+}
+#else
+bool snapshot_tcp_info(const string&, int, int, TCP_INFO_v0_local&) {
+    return false;   // no TCP_INFO equivalent wired up for this platform
 }
 #endif
 

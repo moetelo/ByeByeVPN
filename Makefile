@@ -35,6 +35,7 @@ SRC := \
     src/scan/chrome_ch.cpp \
     src/scan/utls.cpp \
     src/scan/tcpfp.cpp \
+    src/scan/tcp_info_linux.cpp \
     src/scan/ja4s_db.cpp \
     src/scan/amnezia_probe.cpp \
     src/scan/quic.cpp \
@@ -93,6 +94,19 @@ windows-static: $(WIN_OBJ)
 static: $(OBJ)
 	$(CXX) $(CXXFLAGS) -static $(OBJ) -o $(BIN)-static \
 	    -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -lpthread -ldl
+
+# -----------------------------------------------------------------
+# self-contained linux release binary — one file with OpenSSL,
+# libstdc++ and libgcc linked statically; only glibc stays dynamic so
+# getaddrinfo/NSS keeps working (a fully-static glibc binary can't
+# resolve names). needs the static archives from libssl-dev + zlib1g-dev.
+# -----------------------------------------------------------------
+linux-static: $(OBJ)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -static-libstdc++ -static-libgcc \
+	    $(OBJ) -o $(BIN) \
+	    -Wl,-Bstatic -lssl -lcrypto -lz -Wl,-Bdynamic -lpthread -ldl
+	strip $(BIN)
+	@echo "=> $(BIN)  (OpenSSL + libstdc++ + libgcc baked in; glibc dynamic)"
 
 # -----------------------------------------------------------------
 # release zip
@@ -165,7 +179,8 @@ fuzz: fuzz/fuzz_ja4.cpp src/scan/ja4.cpp
 
 clean:
 	rm -f $(OBJ) $(WIN_OBJ) $(BIN) $(BIN)-static $(BIN).exe $(BIN)-*-win64.zip $(BIN)-win64.zip
+	rm -f $(BIN)-*-linux-x86_64.tar.gz byebyevpn-linux-sbom.json
 	rm -f byebyevpn-tests byebyevpn-tests-asan fuzz_ja4 byebyevpn-sbom.json
 	rm -rf dist-release
 
-.PHONY: all windows windows-static static release-zip install clean test test-asan fuzz
+.PHONY: all windows windows-static static linux-static release-zip install clean test test-asan fuzz

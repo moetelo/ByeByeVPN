@@ -325,3 +325,161 @@ jobs:
             byebyevpn-sbom.json
             *.minisig
           if-no-files-found: warn
+
+  # -------------------------------------------------------------------
+  # Linux: the self-contained x86_64 release binary. gates on the same
+  # lint/test + sanitizer jobs as the Windows build. OpenSSL, libstdc++
+  # and libgcc are linked statically; only glibc stays dynamic so
+  # getaddrinfo/NSS keeps resolving names. built on ubuntu-22.04 for a
+  # low glibc floor (2.35) — covers Ubuntu 22.04+, Debian 12+, RHEL 9+.
+  # only a tag push produces a meaningful release; branch / PR pushes
+  # just prove the static link still succeeds.
+  # -------------------------------------------------------------------
+  linux-static:
+    name: static binary (Linux x86_64)
+    needs: [lint-and-test, sanitizers]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ make libssl-dev zlib1g-dev
+
+      - name: build self-contained binary
+        run: |
+          set -eux
+          make linux-static
+          ls -la byebyevpn
+
+      - name: verify openssl / libstdc++ did not leak as a dynamic dep
+        run: |
+          set -eux
+          ldd byebyevpn || true
+          # OpenSSL, libstdc++ and libgcc are meant to be baked in. if any
+          # of them shows up as a dynamic dependency the static link failed
+          # silently and the "self-contained" promise is broken.
+          if ldd byebyevpn | grep -Eq 'libssl|libcrypto|libstdc\+\+|libgcc_s'; then
+            echo "a lib that should be static leaked back in as a dynamic dep"
+            exit 1
+          fi
+          # sanity: glibc IS expected to remain dynamic (that is the whole
+          # point — a static glibc binary can't do getaddrinfo/NSS).
+          ldd byebyevpn | grep -q 'libc\.so' || { echo "unexpected: no libc dep"; exit 1; }
+
+      - name: compute sha256
+        id: hash
+        run: |
+          set -eux
+          H=$(sha256sum byebyevpn | awk '{print $1}')
+          echo "bin_sha=$H" >> "$GITHUB_OUTPUT"
+          echo "byebyevpn sha256: $H"
+
+      - name: generate SBOM
+        run: |
+          set -eux
+          # minimal CycloneDX SBOM: the exact toolchain and OpenSSL package
+          # the binary was built from, plus its sha256. mirrors the Windows
+          # SBOM but records the ubuntu-22.04 libssl-dev package instead of
+          # the pinned msys2 one.
+          BIN_SHA=$(sha256sum byebyevpn | cut -d' ' -f1)
+          GCC_VER=$(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion)
+          SSL_VER=$(dpkg-query -W -f='${Version}' libssl-dev 2>/dev/null || echo unknown)
+          BUILD_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          cat > byebyevpn-linux-sbom.json <<EOF
+          {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "metadata": {
+              "timestamp": "${BUILD_TS}",
+              "component": {
+                "type": "application",
+                "name": "byebyevpn",
+                "version": "${GITHUB_REF_NAME:-dev}",
+                "description": "TSPU/DPI/VPN detectability scanner",
+                "hashes": [
+                  { "alg": "SHA-256", "content": "${BIN_SHA}" }
+                ]
+              },
+              "tools": [
+                { "name": "g++", "version": "${GCC_VER}" }
+              ]
+            },
+            "components": [
+              {
+                "type": "library",
+                "name": "openssl",
+                "version": "${SSL_VER}",
+                "purl": "pkg:deb/ubuntu/libssl-dev@${SSL_VER}?distro=ubuntu-22.04",
+                "description": "statically linked from the ubuntu-22.04 libssl-dev package"
+              },
+              {
+                "type": "library",
+                "name": "doctest",
+                "version": "2.4.11",
+                "purl": "pkg:github/doctest/doctest@v2.4.11",
+                "description": "single-header unit-test framework, test build only"
+              }
+            ]
+          }
+          EOF
+          sha256sum byebyevpn-linux-sbom.json
+
+      - name: build release tarball
+        id: tarball
+        run: |
+          set -eux
+          # GITHUB_REF_NAME on a branch push can contain a slash; sanitize
+          # it so the tarball name is always a single path component.
+          VER="${GITHUB_REF_NAME:-dev}"
+          SAFE_VER=$(echo "$VER" | tr '/' '_')
+          NAME="byebyevpn-${SAFE_VER}-linux-x86_64.tar.gz"
+          mkdir -p dist-release
+          cp byebyevpn LICENSE NOTICE README.md CHANGELOG.md byebyevpn-linux-sbom.json dist-release/
+          tar -C dist-release -czf "${NAME}" .
+          TH=$(sha256sum "${NAME}" | awk '{print $1}')
+          echo "tar_name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "tar_sha=${TH}"    >> "$GITHUB_OUTPUT"
+
+      - name: check for signing key
+        id: signcheck
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -n "${MINISIGN_KEY}" ]; then
+            echo "have_key=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_key=no" >> "$GITHUB_OUTPUT"
+            echo "no MINISIGN_SECRET_KEY secret set — skipping signing (see BUILD.md)"
+          fi
+
+      - name: sign release artifacts (minisign)
+        if: steps.signcheck.outputs.have_key == 'yes'
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PW:  ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -eu
+          # minisign is only needed when a signing key is configured, so it
+          # is installed here rather than in the job-wide package list — an
+          # unsigned release never depends on it.
+          sudo apt-get install -y --no-install-recommends minisign
+          printf '%s\n' "${MINISIGN_KEY}" > "${RUNNER_TEMP}/minisign.key"
+          for f in byebyevpn "${{ steps.tarball.outputs.tar_name }}" byebyevpn-linux-sbom.json; do
+            printf '%s\n' "${MINISIGN_PW}" | \
+              minisign -S -s "${RUNNER_TEMP}/minisign.key" -m "$f"
+          done
+          rm -f "${RUNNER_TEMP}/minisign.key"
+          ls -la *.minisig
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: byebyevpn-linux-x86_64
+          path: |
+            byebyevpn
+            ${{ steps.tarball.outputs.tar_name }}
+            byebyevpn-linux-sbom.json
+            *.minisig
+          if-no-files-found: warn
