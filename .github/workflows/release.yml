@@ -285,37 +285,6 @@ jobs:
           echo "zip_name=${NAME}" >> "$GITHUB_OUTPUT"
           echo "zip_sha=${ZH}"    >> "$GITHUB_OUTPUT"
 
-      - name: check for signing key
-        id: signcheck
-        env:
-          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-        run: |
-          if [ -n "${MINISIGN_KEY}" ]; then
-            echo "have_key=yes" >> "$GITHUB_OUTPUT"
-          else
-            echo "have_key=no" >> "$GITHUB_OUTPUT"
-            echo "no MINISIGN_SECRET_KEY secret set — skipping signing (see BUILD.md)"
-          fi
-
-      - name: sign release artifacts (minisign)
-        if: steps.signcheck.outputs.have_key == 'yes'
-        env:
-          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PW:  ${{ secrets.MINISIGN_PASSWORD }}
-        run: |
-          set -eu
-          # minisign is only needed when a signing key is configured, so it
-          # is installed here rather than in the job-wide package list — an
-          # unsigned release never depends on it.
-          pacman -S --noconfirm --needed minisign
-          printf '%s\n' "${MINISIGN_KEY}" > "${RUNNER_TEMP}/minisign.key"
-          for f in byebyevpn.exe "${{ steps.zipper.outputs.zip_name }}" byebyevpn-sbom.json; do
-            printf '%s\n' "${MINISIGN_PW}" | \
-              minisign -S -s "${RUNNER_TEMP}/minisign.key" -m "$f"
-          done
-          rm -f "${RUNNER_TEMP}/minisign.key"
-          ls -la *.minisig
-
       - uses: actions/upload-artifact@v4
         with:
           name: byebyevpn-win64
@@ -323,7 +292,6 @@ jobs:
             byebyevpn.exe
             ${{ steps.zipper.outputs.zip_name }}
             byebyevpn-sbom.json
-            *.minisig
           if-no-files-found: warn
 
   # -------------------------------------------------------------------
@@ -443,37 +411,6 @@ jobs:
           echo "tar_name=${NAME}" >> "$GITHUB_OUTPUT"
           echo "tar_sha=${TH}"    >> "$GITHUB_OUTPUT"
 
-      - name: check for signing key
-        id: signcheck
-        env:
-          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-        run: |
-          if [ -n "${MINISIGN_KEY}" ]; then
-            echo "have_key=yes" >> "$GITHUB_OUTPUT"
-          else
-            echo "have_key=no" >> "$GITHUB_OUTPUT"
-            echo "no MINISIGN_SECRET_KEY secret set — skipping signing (see BUILD.md)"
-          fi
-
-      - name: sign release artifacts (minisign)
-        if: steps.signcheck.outputs.have_key == 'yes'
-        env:
-          MINISIGN_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PW:  ${{ secrets.MINISIGN_PASSWORD }}
-        run: |
-          set -eu
-          # minisign is only needed when a signing key is configured, so it
-          # is installed here rather than in the job-wide package list — an
-          # unsigned release never depends on it.
-          sudo apt-get install -y --no-install-recommends minisign
-          printf '%s\n' "${MINISIGN_KEY}" > "${RUNNER_TEMP}/minisign.key"
-          for f in byebyevpn "${{ steps.tarball.outputs.tar_name }}" byebyevpn-linux-sbom.json; do
-            printf '%s\n' "${MINISIGN_PW}" | \
-              minisign -S -s "${RUNNER_TEMP}/minisign.key" -m "$f"
-          done
-          rm -f "${RUNNER_TEMP}/minisign.key"
-          ls -la *.minisig
-
       - uses: actions/upload-artifact@v4
         with:
           name: byebyevpn-linux-x86_64
@@ -481,5 +418,4 @@ jobs:
             byebyevpn
             ${{ steps.tarball.outputs.tar_name }}
             byebyevpn-linux-sbom.json
-            *.minisig
           if-no-files-found: warn

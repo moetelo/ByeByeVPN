@@ -175,33 +175,6 @@ sha256sum byebyevpn-v2.6.0-win64.zip
 A mismatch means the file was altered in transit (CDN / middlebox /
 your download tool). Do not run it.
 
-### minisign signatures
-
-From v2.6.0 the CI also signs `byebyevpn.exe`, the release zip and
-`byebyevpn-sbom.json` with [minisign](https://jedisct1.github.io/minisign/).
-Each artifact gets a matching `.minisig` file in the release. Verify
-with the project public key:
-
-```bash
-minisign -Vm byebyevpn-v2.6.0-win64.zip -P <project-public-key>
-```
-
-The public key is published in the repo (`minisign.pub`) and in the
-release notes. A good signature means the artifact came from the CI
-pipeline unmodified — useful when GitHub's own CDN is the thing you
-don't trust.
-
-Signing is keyed off the `MINISIGN_SECRET_KEY` / `MINISIGN_PASSWORD`
-repository secrets. If they are not set the build still succeeds, it
-just ships unsigned (the `.minisig` files are simply absent). To set
-signing up:
-
-```bash
-minisign -G                       # generates minisign.key + minisign.pub
-# add the contents of minisign.key as the MINISIGN_SECRET_KEY secret,
-# its password as MINISIGN_PASSWORD, and commit minisign.pub to the repo.
-```
-
 ## Software bill of materials
 
 Every release ships `byebyevpn-sbom.json`, a CycloneDX 1.5 document

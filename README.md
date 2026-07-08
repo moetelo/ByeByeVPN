@@ -218,9 +218,8 @@ Linux / macOS: run through Wine. Everything except `local`
 (host-side adapter enumeration) works identically.
 
 Verify what you downloaded: every release ships a SHA256 in the
-release notes, a CycloneDX SBOM (`byebyevpn-sbom.json`), and -
-when the project signing key is configured - matching `.minisig`
-signatures. See `BUILD.md` for the verify recipe.
+release notes and a CycloneDX SBOM (`byebyevpn-sbom.json`) with the
+binary's hash baked in. See `BUILD.md` for the verify recipe.
 
 ### CLI
 
@@ -557,10 +556,9 @@ Windows: скачать `byebyevpn-v2.8.3-win64.zip` со страницы
 Linux / macOS: через Wine. Всё кроме `local` (адаптеры хоста)
 работает идентично.
 
-Проверка скачанного: каждый релиз идёт с SHA256 в release notes,
-CycloneDX-SBOM (`byebyevpn-sbom.json`) и - когда выставлен ключ
-подписи проекта - с `.minisig` подписями. Рецепт верификации в
-`BUILD.md`.
+Проверка скачанного: каждый релиз идёт с SHA256 в release notes и
+CycloneDX-SBOM (`byebyevpn-sbom.json`) с хешем бинарника внутри.
+Рецепт верификации в `BUILD.md`.
 
 ### CLI
 
